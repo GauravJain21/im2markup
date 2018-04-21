@@ -1,10 +1,13 @@
+
+
  --[[ Model, adapted from https://github.com/harvardnlp/seq2seq-attn/blob/master/train.lua
 --]]
+
 require 'nn'
 require 'cudnn'
 require 'optim'
 require 'paths'
-
+--Load package from their respective locations
 package.path = package.path .. ';src/?.lua' .. ';src/utils/?.lua' .. ';src/model/?.lua' .. ';src/optim/?.lua'
 require 'cnn'
 require 'LSTM'
@@ -15,6 +18,7 @@ require 'optim_adadelta'
 require 'optim_sgd'
 require 'memory'
 
+--Create the model
 local model = torch.class('Model')
 
 --[[ Args: 
@@ -34,6 +38,7 @@ local model = torch.class('Model')
 
 -- init
 function model:__init()
+    --if logging is on, define log as a function and insert msg in the logging else log = print
     if logging ~= nil then
         log = function(msg) logging:info(msg) end
     else
@@ -43,38 +48,45 @@ end
 
 -- load model from model_path
 function model:load(model_path, config)
+    --if configuration is pre-specified, use it else make the config null in order to use the config loaded from model_path
     config = config or {}
 
     -- Build model
-
+    --if model doesn't exist in model_path, print so and abort else continue with the execution of program
     assert(paths.filep(model_path), string.format('Model %s does not exist!', model_path))
-
+    --load the model in "checkpoint"
     local checkpoint = torch.load(model_path)
+
+    --model and its configuration are loaded from checkpoint
     local model, model_config = checkpoint[1], checkpoint[2]
+    --Allocate memory to the model
     preallocateMemory(model_config.prealloc)
-    self.cnn_model = model[1]:double()
-    self.encoder_fw = model[2]:double()
-    self.encoder_bw = model[3]:double()
-    self.decoder = model[4]:double()      
+
+    --convert the following to double
+    --every parameter is stored in the model
+    self.cnn_model = model[1]:double()      --cnn model
+    self.encoder_fw = model[2]:double()     --encoder forward
+    self.encoder_bw = model[3]:double()     --encoder backward
+    self.decoder = model[4]:double()        --decoder
     self.output_projector = model[5]:double()
-    self.pos_embedding_fw = model[6]:double()
-    self.pos_embedding_bw = model[7]:double()
-    self.global_step = checkpoint[3]
+    self.pos_embedding_fw = model[6]:double()--position embedding forward
+    self.pos_embedding_bw = model[7]:double()--position embedding backward
+    self.global_step = checkpoint[3]        
     self.optim_state = checkpoint[4]
     id2vocab = checkpoint[5]
 
     -- Load model structure parameters
     self.cnn_feature_size = 512
     self.dropout = model_config.dropout
-    self.encoder_num_hidden = model_config.encoder_num_hidden
-    self.encoder_num_layers = model_config.encoder_num_layers
-    self.decoder_num_hidden = self.encoder_num_hidden * 2
-    self.decoder_num_layers = model_config.decoder_num_layers
-    self.target_vocab_size = #id2vocab+4
+    self.encoder_num_hidden = model_config.encoder_num_hidden   --number of neurons in encoder
+    self.encoder_num_layers = model_config.encoder_num_layers   --number of layers in encoder
+    self.decoder_num_hidden = self.encoder_num_hidden * 2       --number of neurons in decoder is twice to that in encoder
+    self.decoder_num_layers = model_config.decoder_num_layers   --number of layers remain same
+    self.target_vocab_size = #id2vocab+4                        --target vocabulary size
     self.target_embedding_size = model_config.target_embedding_size
     self.input_feed = model_config.input_feed
     self.prealloc = model_config.prealloc
-
+    --if config is defined, load the parameters from it else use the default model_config
     self.max_encoder_l_w = config.max_encoder_l_w or model_config.max_encoder_l_w
     self.max_encoder_l_h = config.max_encoder_l_h or model_config.max_encoder_l_h
     self.max_decoder_l = config.max_decoder_l or model_config.max_decoder_l
@@ -112,25 +124,60 @@ function model:create(config)
     self.prealloc = config.prealloc
     preallocateMemory(config.prealloc)
 
-    self.pos_embedding_fw = nn.Sequential():add(nn.LookupTable(self.max_encoder_l_h,self.encoder_num_layers*self.encoder_num_hidden*2))
-    self.pos_embedding_bw = nn.Sequential():add(nn.LookupTable(self.max_encoder_l_h, self.encoder_num_layers*self.encoder_num_hidden*2))
+    self.pos_embedding_fw = nn.Sequential():add(nn.LookupTable(self.max_encoder_l_h, self.encoder_num_layers*self.encoder_num_hidden * 2))
+    self.pos_embedding_bw = nn.Sequential():add(nn.LookupTable(self.max_encoder_l_h, self.encoder_num_layers*self.encoder_num_hidden * 2))
     -- CNN model, input size: (batch_size, 1, 32, width), output size: (batch_size, sequence_length, 512)
     self.cnn_model = createCNNModel()
-    -- createLSTM(input_size, num_hidden, num_layers, dropout, use_attention, input_feed, use_lookup, vocab_size)
+    -- createLSTM(input_size = 512, num_hidden, num_layers, dropout, use_attention = false, input_feed = false, use_lookup = false, vocab_size = nil)
+    -- (512, neurons, layers, dropout, batch size, encoder length) for both forward and backward encoder
     self.encoder_fw = createLSTM(self.cnn_feature_size, self.encoder_num_hidden, self.encoder_num_layers, self.dropout, false, false, false, nil, self.batch_size, self.max_encoder_l, 'encoder-fw')
     self.encoder_bw = createLSTM(self.cnn_feature_size, self.encoder_num_hidden, self.encoder_num_layers, self.dropout, false, false, false, nil, self.batch_size, self.max_encoder_l, 'encoder-bw')
+    --in decoder, we use attention, input_feed, use_lookup, and vocab size as well.
+    --[[(
+        512         --> target embedding size, 
+        neurons     --> neurons, 
+        layers      --> layers, 
+        dropout     --> dropout, 
+        no attention--> attention, 
+        no feed     --> input feed, 
+        no vocab    --> vocab size, 
+        batch size  --> batch size, 
+        encoder len --> encoder length
+        )
+
+        https://stackoverflow.com/questions/37126328/how-to-use-nn-lookuptable-in-torch
+https://github.com/torch/nn/blob/master/LookupTable.lua
+https://github.com/torch/nn/blob/master/doc/module.md#nn.Module
+http://nn.readthedocs.io/en/rtd/convolution/#lookuptable
+https://github.com/torch/nn/blob/master/doc/convolution.md#nn.LookupTable
+https://stackoverflow.com/questions/11819886/regular-expression-search-replace-in-sublime-text-2
+http://kbullaughey.github.io/lstm-play/2015/09/21/torch-and-gpu.html
+https://github.com/torch/nn/blob/master/Module.lua
+https://www.reddit.com/r/MachineLearning/comments/3s7728/when_is_cloning_in_torch_necessary_and_why/
+https://github.com/karpathy/char-rnn/blob/master/train.lua
+https://github.com/karpathy/char-rnn/blob/master/train.lua#L247
+https://github.com/karpathy/char-rnn/blob/master/train.lua#L272
+https://github.com/karpathy/char-rnn/blob/master/train.lua#L192
+https://www.google.co.in/search?safe=active&ei=vpHZWtq9HISq0gTmmoXQCQ&q=ocr+ml+techniques&oq=ocr+ml+techniques&gs_l=psy-ab.3..33i21k1.23221.26655.0.26812.16.16.0.0.0.0.377.2441.0j5j3j2.10.0....0...1c.1.64.psy-ab..6.10.2439...0j0i22i30k1j33i160k1.0.wGDNnpSdTVs
+https://en.wikipedia.org/wiki/Optical_character_recognition
+http://www.cvisiontech.com/resources/ocr-primer/ocr-neural-networks-and-other-machine-learning-techniques.html
+
+    --]]
+
+
     self.decoder = createLSTM(self.target_embedding_size, self.decoder_num_hidden, self.decoder_num_layers, self.dropout, true, self.input_feed, true, self.target_vocab_size, self.batch_size, self.max_encoder_l, 'decoder')
     self.output_projector = createOutputUnit(self.decoder_num_hidden, self.target_vocab_size)
     self.global_step = 0
     self._init = true
 
-    self.optim_state = {}
-    self.optim_state.learningRate = config.learning_rate
-    self:_build()
+    self.optim_state = {}   --optim_state is empty
+    self.optim_state.learningRate = config.learning_rate    --learning rate is derived from config
+    self:_build()   --call build function
 end
 
 -- build
 function model:_build()
+    --print the model parameters to the log file
     log(string.format('cnn_featuer_size: %d', self.cnn_feature_size))
     log(string.format('dropout: %f', self.dropout))
     log(string.format('encoder_num_hidden: %d', self.encoder_num_hidden))
@@ -146,7 +193,7 @@ function model:_build()
     log(string.format('batch_size: %d', self.batch_size))
     log(string.format('prealloc: %s', self.prealloc))
 
-
+    --create config 
     self.config = {}
     self.config.dropout = self.dropout
     self.config.encoder_num_hidden = self.encoder_num_hidden
@@ -169,26 +216,75 @@ function model:_build()
     self.criterion = createCriterion(self.target_vocab_size)
 
     -- convert to cuda if use gpu
+    --[[
+    localize = function(object)
+        if use_cuda then
+            return object:cuda()
+        end
+        return object
+    end
+    ]]
     self.layers = {self.cnn_model, self.encoder_fw, self.encoder_bw, self.decoder, self.output_projector, self.pos_embedding_fw, self.pos_embedding_bw}
     for i = 1, #self.layers do
-        localize(self.layers[i])
+        localize(self.layers[i])    --localize looks at the use_cuda flag to decide whether to convert the tensor to cuda tensor for training on a GPU or not
     end
-    localize(self.criterion)
 
+    localize(self.criterion)
+    --[[ BS * (encoder_l_w * encoder_l_h) * (2 * neurons) --> 3D
+        l = BS
+        w = encoder_l_w * encoder_l_h
+        h = 2 * neurons
+    ]]
     self.context_proto = localize(torch.zeros(self.batch_size, self.max_encoder_l_w*self.max_encoder_l_h, 2*self.encoder_num_hidden))
+    -- BS * (encoder_l_w * encoder_l_h) * neurons
     self.encoder_fw_grad_proto = localize(torch.zeros(self.batch_size, self.max_encoder_l_w*self.max_encoder_l_h, self.encoder_num_hidden))
+    -- BS * (encoder_l_w * encoder_l_h) * neurons
     self.encoder_bw_grad_proto = localize(torch.zeros(self.batch_size, self.max_encoder_l_w*self.max_encoder_l_h, self.encoder_num_hidden))
+    -- encoder_l_h * BS * encoder_l_w * cnn_feature_size
     self.cnn_grad_proto = localize(torch.zeros(self.max_encoder_l_h, self.batch_size, self.max_encoder_l_w, self.cnn_feature_size))
+    -- BS * (2 * layers * neurons)
     self.pos_embedding_grad_fw_proto = localize(torch.zeros(self.batch_size, self.encoder_num_layers*self.encoder_num_hidden*2))
+
+--[[
+function Module:getParameters()
+   -- get parameters
+   local parameters,gradParameters = self:parameters()
+   local p, g = Module.flatten(parameters), Module.flatten(gradParameters)
+   --nElement() return total number of elements
+   assert(p:nElement() == g:nElement(),
+      'check that you are sharing parameters and gradParameters')
+   if parameters then
+      for i=1,#parameters do
+         assert(parameters[i]:storageOffset() == gradParameters[i]:storageOffset(),
+            'misaligned parameter at ' .. tostring(i))
+      end
+   end
+   return p, g
+end
+
+
+http://pytorch.org/docs/stable/torch.html
+http://kbullaughey.github.io/lstm-play/2015/09/21/torch-and-gpu.html
+https://github.com/search?q=encoder_fw_grad_proto+in%3Afile&type=Code
+https://github.com/ducanh841988/Handwritten-Math-Recognition/blob/master/src/model/model.lua
+https://github.com/torch/torch7/blob/master/doc/storage.md
+https://github.com/karpathy/char-rnn
+http://karpathy.github.io/2015/05/21/rnn-effectiveness/
+https://gist.github.com/karpathy/d4dee566867f8291f086
+https://github.com/jcjohnson/torch-rnn
+https://github.com/jcjohnson/torch-rnn/blob/master/doc/modules.md
+
+]]
+
 
     local num_params = 0
     self.params, self.grad_params = {}, {}
     for i = 1, #self.layers do
-        local p, gp = self.layers[i]:getParameters()
+        local p, gp = self.layers[i]:getParameters()    --get the parameters of the ith layer and store in p and gp for parameters and gradient parameters respectively
         if self._init then
-            p:uniform(-0.05,0.05)
+            p:uniform(-0.05,0.05)   --weight matrix is initialized uniformly between -0.05 to 0.05
         end
-        num_params = num_params + p:size(1)
+        num_params = num_params + p:size(1)     -- total number of parameters are incremented by the number of parameters in ith layer every time
         self.params[i] = p
         self.grad_params[i] = gp
     end
@@ -634,6 +730,16 @@ function model:step(batch, forward_only, beam_size, trie)
         local loss, accuracy = 0.0, 0.0
         if forward_only then
             -- final decoding
+            --[[
+                 <-------target_l-------->
+                 _________________________
+               | |________________________|                       
+               B |________________________|                       
+               S |________________________|                       
+               | |________________________|
+
+
+            ]]
             local labels = localize(torch.zeros(batch_size, target_l)):fill(1)
             local scores, indices = torch.max(self.beam_scores[{{1,batch_size},{}}], 2) -- batch_size, 1
             indices = localize(indices:double())
