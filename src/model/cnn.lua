@@ -9,8 +9,9 @@ function createCNNModel(use_cuda)
     model:add(nn.MulConstant(1.0 / 128))
     --[[
         batch_size = 1
-        imgH = 3 * 3 * 1
-        imgW = 1 * 1 * 1
+        kernel size = 3 x 3
+        stride = 1
+        padding = 1
     ]]
     --function SpatialConvolution:__init(nInputPlane, nOutputPlane, kW, kH, dW, dH, padW, padH)
     --[[
