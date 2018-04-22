@@ -14,7 +14,7 @@
  --        inputs: x, (context), (prev attention), [prev_c, prev_h]*L
  --        outputs: [next_c, next_h]*L, h_out
  --]]
- 
+
 function createLSTM(input_size, num_hidden, num_layers,
     dropout,
     use_attention, input_feed,
@@ -27,6 +27,12 @@ function createLSTM(input_size, num_hidden, num_layers,
 
   -- there will be 2*n+1 inputs
   local inputs = {}
+  --[[
+    module = nn.Identity()
+    Creates a module that returns whatever is input to it as output. 
+    This is useful when combined with the module ParallelTable in case 
+    you do not wish to do anything to one of the input Tensors.
+  ]]
   table.insert(inputs, nn.Identity()()) -- x
   local offset = 0
   if use_attention then
@@ -42,13 +48,26 @@ function createLSTM(input_size, num_hidden, num_layers,
     table.insert(inputs, nn.Identity()()) -- prev_h[L]
   end
 
+h1 = nn.Linear(20, 10)()
+h2 = nn.Linear(10, 1)(nn.Tanh()(nn.Linear(10, 10)(nn.Tanh()(h1))))
+mlp = nn.gModule({h1}, {h2})
+
+x = torch.rand(20)
+dx = torch.rand(1)
+mlp:updateOutput(x)
+mlp:updateGradInput(x, dx)
+mlp:accGradParameters(x, dx)
+
+-- draw graph (the forward graph, '.fg')
+graph.dot(mlp.fg, 'MLP')
   local x, input_size_L
   local outputs = {}
   for L = 1, num_layers do
     local nameL = model..'_L'..L..'_'
     -- c,h from previos timesteps
-    local prev_h = inputs[L*2+1+offset]
-    local prev_c = inputs[L*2+offset]
+    local prev_c = inputs[2 * L + offset]
+    local prev_h = inputs[2 * L  + 1 + offset]
+    
     -- the input to this layer
     if L == 1 then
       if use_lookup then
@@ -64,9 +83,9 @@ function createLSTM(input_size, num_hidden, num_layers,
           input_size_L = input_size + num_hidden
       end    
     else 
-      x = outputs[(L-1)*2] 
+      x = outputs[2 * (L - 1)] 
       if dropout then x = nn.Dropout(dropout):usePrealloc(nameL.."dropout",
-          {{batch_size, input_size_L}})(x) end -- apply dropout, if any
+          {{batch_size, input_size_L}})(x) end -- apply dropout on x, if any
       input_size_L = num_hidden
     end
     local i2h_name
@@ -91,13 +110,14 @@ function createLSTM(input_size, num_hidden, num_layers,
     local n1, n2, n3, n4 = nn.SplitTable(2):usePrealloc(nameL.."reshapesplit",
                                                           {{batch_size, 4, num_hidden}})(reshaped):split(4)
     -- decode the gates
+
     local in_gate = nn.Sigmoid():usePrealloc(nameL.."G1-reuse",{{batch_size, num_hidden}})(n1)
     local forget_gate = nn.Sigmoid():usePrealloc(nameL.."G2-reuse",{{batch_size, num_hidden}})(n2)
     local out_gate = nn.Sigmoid():usePrealloc(nameL.."G3-reuse",{{batch_size, num_hidden}})(n3)
     -- decode the write inputs
     local in_transform = nn.Tanh():usePrealloc(nameL.."G4-reuse",{{batch_size, num_hidden}})(n4)
     -- perform the LSTM update
-    local next_c           = nn.CAddTable():usePrealloc(nameL.."G5a",{{batch_size,num_hidden},{batch_size,num_hidden}})({
+    local next_c  = nn.CAddTable():usePrealloc(nameL.."G5a",{{batch_size,num_hidden},{batch_size,num_hidden}})({
         nn.CMulTable():usePrealloc(nameL.."G5b",{{batch_size,num_hidden},{batch_size,num_hidden}})({forget_gate, prev_c}),
         nn.CMulTable():usePrealloc(nameL.."G5c",{{batch_size,num_hidden},{batch_size,num_hidden}})({in_gate,     in_transform})
       })
